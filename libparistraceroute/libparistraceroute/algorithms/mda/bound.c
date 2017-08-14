@@ -83,18 +83,12 @@ inline static bool continue_condition(
     long double   cur_state, 
     bound_t     * bound
 ) {
-
-    bool        ret = true;
-    size_t      i;
-    long double pr_sum = 0.0;
+    bool ret = true;
     
     if (jstart == hypothesis - 1) {
-        for (i = 0; i <= jstart; ++i) {
-            pr_sum += bound->pk_table[i];
-        }
-        if (pr_sum + cur_state <= bound->confidence) {
+        if (cur_state <= bound->ak_table[hypothesis]) {
             ret = false;
-            bound->pr_failure[hypothesis] = pr_sum + cur_state;
+            bound->pr_failure[hypothesis] = cur_state;
         }
     }
     return ret;
@@ -143,6 +137,9 @@ static probability_t init_state(bound_t * bound, bound_state_t * bound_state) {
  * graph-wide confidence and max assumed branching points
  */
 
+// NOTE: this comes from (10) in the 2009 MDA paper
+// Basically: calculates B*_k_i given B*_all and a bound on total number of
+// load balancers in the graph
 static double node_confidence(double graph_confidence, size_t max_branch)
 {
     double ret;
@@ -151,6 +148,31 @@ static double node_confidence(double graph_confidence, size_t max_branch)
     ret = pow((1 - graph_confidence), power); 
     return 1 - ret;
 } 
+
+/**
+ * \brief Pre-compute significance levels following procedure derived from 
+ * equations (8) and (9) in the 2009 MDA paper
+ */
+static void bound_init_aks(bound_t * bound) 
+{
+    size_t i;
+    double r = 0.9; // Section III.B of 2009 MDA paper finds this to be a reasonable value
+    double a1 = (1 - r) * bound->confidence; 
+
+    // To stay consistent with nk table, set the first two "dummy states" to zero
+    bound->ak_table[0] = 0.0;
+    bound->ak_table[1] = 0.0;
+   
+    // Annoyingly, the index shift rightwards in the MDA implementation means that a1
+    // maps to index 2...
+    bound->ak_table[2] = a1; 
+                         
+    for (i = 3; i < bound->max_n + 1; i++) {
+        // From (8) in 2009 MDA paper. Minus 2 because, again, the indexes are one larger 
+        // than the corresponding paper indexes
+        bound->ak_table[i] = a1 * pow(r, i - 2);
+    }     
+}
 
 /**
  * \brief Reallocate memory in bound structure given new Hypothesis 
@@ -182,8 +204,8 @@ static bool reallocate_bound(bound_t * bound, size_t new_max_n)
                  ))){
         goto ERR_REALLOC;
     } 
-    if (!(bound->pk_table = realloc(
-                 bound->pk_table,
+    if (!(bound->ak_table = realloc(
+                 bound->ak_table,
                  ((new_max_n + 1) * sizeof(probability_t))
                  ))){
         goto ERR_REALLOC;
@@ -220,7 +242,7 @@ bound_t * bound_create(double confidence, size_t max_interfaces, size_t max_bran
         goto ERR_NK_TABLE_MALLOC;
     }
 
-    if (!(bound->pk_table = calloc((max_interfaces + 1), sizeof(probability_t)))) {
+    if (!(bound->ak_table = calloc((max_interfaces + 1), sizeof(probability_t)))) {
         goto ERR_PK_TABLE_MALLOC;
     }
 
@@ -235,8 +257,7 @@ bound_t * bound_create(double confidence, size_t max_interfaces, size_t max_bran
     // First two hypotheses represent impossible "dummy" states
     bound->nk_table[0] = 0.0;
     bound->nk_table[1] = 0.0;
-    bound->pk_table[0] = 0.0;
-    bound->pk_table[1] = 0.0;
+    bound_init_aks(bound);            // Pre-compute significance levels (aks)
     bound_build(bound, bound->max_n); // Calculate stopping points
 
     return bound;
@@ -244,7 +265,7 @@ bound_t * bound_create(double confidence, size_t max_interfaces, size_t max_bran
     ERR_STATE:
         free(bound->pr_failure);
     ERR_PR_FAILURE:
-        free(bound->pk_table);
+        free(bound->ak_table);
     ERR_PK_TABLE_MALLOC:
         free(bound->nk_table);
     ERR_NK_TABLE_MALLOC:
@@ -271,6 +292,7 @@ void bound_build(bound_t * bound, size_t end)
         if (reallocate_bound(bound, end)) {
             hypothesis   = bound->max_n + 1; // Begin at next hypothesis
             bound->max_n = end;
+            bound_init_aks(bound); // More significance levels will need to be pre-computed
         }
     }
 
@@ -286,13 +308,11 @@ void bound_build(bound_t * bound, size_t end)
                 cur_state = calculate(state, hypothesis, j); 
 
                 // If at a previously computed stopping point, enter
-                // unreachable state (probability 0). Add probability of
-                // failure at this level to pk_table
+                // unreachable state (probability 0). 
                 if (NUM_PROBES(i, j) == (bound->nk_table)[j + 1]) {
                     jstart = j + 1;
                     state->second[j] = 0.0;
                     state->first[j] = 0.0;
-                    (bound->pk_table)[j + 1] = cur_state;
                 } else {
                     state->second[j] = cur_state;
                 }
@@ -342,7 +362,8 @@ void bound_dump(bound_t * bound)
 void bound_free(bound_t * bound)
 {
     if (bound) {
-        if (bound->pk_table) free(bound->pk_table);
+        //if (bound->pk_table) free(bound->pk_table);
+        if (bound->ak_table) free(bound->ak_table);
         if (bound->nk_table) free(bound->nk_table);
         if (bound->pr_failure) free(bound->pr_failure);
         if (bound->state)    bound_state_free(bound->state);
@@ -355,8 +376,6 @@ int main(int argc, const char * argv[]) {
     size_t      interfaces;
     size_t      max_branch;
 
-//    sscanf(argv[1], "%Lf", &confidence);
-//    sscanf(argv[2], "%d", &interfaces);
     confidence = .05;
     interfaces = 16;
     max_branch = 1;

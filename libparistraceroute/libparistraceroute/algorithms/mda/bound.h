@@ -32,10 +32,8 @@ typedef struct {
     double          confidence; /**< Desired failure confidence */
     size_t          max_n;      /**< Max assumed branching at an interface */
     size_t        * nk_table;   /**< Stored stopping points */
-    probability_t * pk_table;   /**< Temp stored probabilities at stopping
-                                     point states for each hypothesis */
-    probability_t * pr_failure; /**< Table to store actual probability of
-                                     failure if given hypothesis (index) is true */
+    probability_t * ak_table;   /**< Target significance levels */
+    probability_t * pr_failure; /**< Actual significance levels */
     bound_state_t * state;      /**< Reference to memory used to build state */
 } bound_t;
 
